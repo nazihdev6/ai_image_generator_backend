@@ -172,7 +172,7 @@ export async function verifyGoogleReceipt(
         isValid: true,
         transactionId: purchase.orderId || `google_${Date.now()}`,
         productId: productId,
-        purchaseDate: purchase.purchaseTimeMillis,
+        purchaseDate: purchase.purchaseTimeMillis || undefined,
         isTestPurchase: false
       };
     }
