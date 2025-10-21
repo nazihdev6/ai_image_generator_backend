@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { users, transactions, creditHistories } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { verifyToken } from '@/lib/auth';
+import { verifyToken } from '@/lib/jwt';
 import { PRODUCT_CREDITS_MAP } from '@/lib/constants';
 import {
   verifyAppleReceipt,
@@ -33,10 +33,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const decoded = verifyToken(token);
-    if (!decoded) {
+    let decoded: any;
+    try {
+      decoded = verifyToken(token);
+      if (!decoded) {
+        return NextResponse.json(
+          { success: false, error: 'Unauthorized - Invalid token' },
+          { status: 401 }
+        );
+      }
+    } catch (error) {
       return NextResponse.json(
-        { success: false, error: 'Unauthorized - Invalid token' },
+        { success: false, error: 'Unauthorized - Invalid or expired token' },
         { status: 401 }
       );
     }
