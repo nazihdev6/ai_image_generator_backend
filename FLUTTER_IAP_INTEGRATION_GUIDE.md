@@ -459,11 +459,76 @@ export const PRODUCT_CREDITS_MAP: Record<string, number> = {
 
 ## 🧪 **Testing**
 
-### **iOS: Testing with StoreKit Configuration**
+### **⚠️ IMPORTANT: iOS Simulator Limitation**
+
+**iOS Simulator does NOT have valid App Store receipts!** You will get error `21002` (receipt malformed) from Apple.
+
+**Solutions:**
+1. **Use `isTestMode: true`** (bypasses Apple verification) - RECOMMENDED for simulator
+2. **Test on a real iOS device** with App Store Sandbox account
+
+---
+
+### **iOS: Testing with StoreKit Configuration on Simulator**
+
+**For iOS Simulator, you MUST use test mode:**
 
 1. Create a StoreKit Configuration file in Xcode
 2. Add your product IDs to the configuration
-3. Set `isTestMode: true` in the request:
+3. **Set `isTestMode: true`** to bypass Apple verification:
+
+```dart
+// In your IAPManager class, detect if running on simulator
+import 'dart:io';
+
+Future<bool> _verifyPurchaseWithBackend(PurchaseDetails purchaseDetails) async {
+  // ...
+  
+  // ⚠️ CRITICAL: iOS Simulator doesn't have valid receipts
+  // Check if we're on simulator (you need to implement this check)
+  final bool isSimulator = await _isRunningOnSimulator();
+  
+  final requestBody = {
+    'transactionId': transactionId,
+    'productId': productId,
+    'receipt': receipt,
+    'platform': 'ios',
+    'isTestMode': isSimulator || true,  // ✅ Enable for StoreKit testing
+  };
+  
+  // ...
+}
+
+// Helper to check if running on simulator
+Future<bool> _isRunningOnSimulator() async {
+  if (!Platform.isIOS) return false;
+  
+  // On simulator, device model contains "Simulator"
+  // You can use device_info_plus package for this
+  // For now, just return true for all iOS testing
+  return true;
+}
+```
+
+**Or simply hardcode for testing:**
+```dart
+final requestBody = {
+  'transactionId': transactionId,
+  'productId': productId,
+  'receipt': receipt,
+  'platform': 'ios',
+  'isTestMode': true,  // ✅ Always true for simulator testing
+};
+```
+
+### **iOS: Testing on Real Device (App Store Sandbox)**
+
+**For production-like testing with real Apple verification:**
+
+1. **Create a Sandbox Tester Account** in App Store Connect
+2. **Sign out** of your real Apple ID on the iOS device
+3. **Don't sign in** to the sandbox account until prompted during purchase
+4. **Set `isTestMode: false`** to use real Apple verification:
 
 ```dart
 final requestBody = {
@@ -471,9 +536,14 @@ final requestBody = {
   'productId': productId,
   'receipt': receipt,
   'platform': 'ios',
-  'isTestMode': true,  // ✅ Enable for StoreKit testing
+  'isTestMode': false,  // ✅ Real Apple verification (sandbox)
 };
 ```
+
+5. When prompted during purchase, sign in with your **Sandbox Tester** account
+6. Backend will verify with Apple's sandbox servers
+
+---
 
 ### **Android: Testing with Google Play Console**
 
@@ -491,9 +561,17 @@ final requestBody = {
 };
 ```
 
-### **Backend Environment**
+---
 
-Ensure `ALLOW_TEST_PURCHASES=true` in backend environment variables for testing.
+### **Backend Environment Variables**
+
+Make sure these are set in your Vercel environment:
+
+```env
+ALLOW_TEST_PURCHASES=true          # Allow test mode purchases
+APPLE_ENV=sandbox                  # Use sandbox for testing
+APPLE_SHARED_SECRET=your_secret    # From App Store Connect
+```
 
 ---
 
@@ -593,10 +671,18 @@ After purchase, check if the backend received the request:
    - iOS: Check App Store Connect product IDs (e.g., `com.chitra.credits_10`)
    - Android: Check Google Play Console product IDs (e.g., `credits_10`)
 
-4. **Invalid receipt:**
+4. **Invalid receipt / Error 21002:**
+   - **Most common cause:** Testing on iOS Simulator (simulators don't have valid receipts)
+   - **Solution:** Set `isTestMode: true` for simulator testing
+   - **Or:** Test on a real iOS device with App Store Sandbox account
    - Receipt is empty or null
    - Check `purchaseDetails.verificationData.serverVerificationData` is not null
-   - For iOS: Ensure app has a valid receipt (test on device, not simulator)
+   
+   **Apple Status Codes:**
+   - `21002`: Receipt data malformed (usually simulator)
+   - `21003`: Receipt authentication failed
+   - `21007`: Sandbox receipt sent to production (auto-retries with sandbox)
+   - `21008`: Production receipt sent to sandbox
 
 5. **Purchase not completing:**
    - `completePurchase()` called before backend verification

@@ -44,12 +44,26 @@ export async function POST(req: Request) {
             );
         }
 
-        const [user] = await db.insert(schema.users).values(data).returning(userSelectFields);
+        // Create new user with initial 5 free credits
+        const [user] = await db.insert(schema.users).values({
+            ...data,
+            credits: 5  // Give 5 free credits on registration
+        }).returning(userSelectFields);
 
         const accessToken = generateToken(user);
         const refreshToken = generateToken(user);
 
         await db.update(schema.users).set({ token: refreshToken }).where(eq(schema.users.id, user.id));
+
+        // Record the initial free credits in credit_histories
+        await db.insert(schema.creditHistories).values({
+            userId: user.id,
+            amount: 5,
+            type: 'REGISTRATION_BONUS',
+            createdAt: new Date()
+        });
+
+        console.log(`✅ New user registered: ${user.email} - 5 free credits added`);
 
         return Response.json(
             { message: "Welcome to Chitra AI", data: { ...user, accessToken, refreshToken }, statusCode: 200 },
