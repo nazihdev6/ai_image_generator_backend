@@ -79,7 +79,38 @@ export async function POST(req: NextRequest) {
     }
 
     // ============================================
-    // STEP 3: GET CREDITS FOR PRODUCT
+    // STEP 3: CHECK FOR DUPLICATES FIRST (Prevent race condition)
+    // ============================================
+
+    // Check if this transaction ID has already been processed
+    // This prevents multiple simultaneous requests from adding credits multiple times
+    const existingTransaction = await db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.transactionId, transactionId))
+      .limit(1);
+
+    if (existingTransaction.length > 0) {
+      console.log(`⚠️  Duplicate transaction detected (early check): ${transactionId}`);
+      console.log(`   Transaction already processed at: ${existingTransaction[0].verifiedAt}`);
+      
+      // Return success with existing transaction details to avoid app errors
+      const existingCredits = existingTransaction[0].credits;
+      
+      return NextResponse.json<IAPVerificationResponse>(
+        {
+          success: true,
+          credits: existingCredits,
+          newBalance: (await db.select().from(users).where(eq(users.id, userId)).limit(1))[0]?.credits || 0,
+          isTestPurchase: existingTransaction[0].isTest || false,
+          message: `Transaction already processed - ${existingCredits} credits were previously added`
+        },
+        { status: 200 }
+      );
+    }
+
+    // ============================================
+    // STEP 4: GET CREDITS FOR PRODUCT
     // ============================================
 
     const credits = PRODUCT_CREDITS_MAP[productId];
@@ -96,7 +127,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ============================================
-    // STEP 4: VERIFY RECEIPT
+    // STEP 5: VERIFY RECEIPT
     // ============================================
 
     let verificationResult;
@@ -130,7 +161,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ============================================
-    // STEP 5: CHECK IF VALID
+    // STEP 6: CHECK IF VALID
     // ============================================
 
     if (!verificationResult || !verificationResult.isValid) {
@@ -143,30 +174,6 @@ export async function POST(req: NextRequest) {
         },
         { status: 400 }
       );
-    }
-
-    // ============================================
-    // STEP 6: CHECK FOR DUPLICATES (Skip for test purchases)
-    // ============================================
-
-    if (!verificationResult.isTestPurchase) {
-      const existingTransaction = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.transactionId, verificationResult.transactionId!))
-        .limit(1);
-
-      if (existingTransaction.length > 0) {
-        console.log(`⚠️  Duplicate transaction detected: ${verificationResult.transactionId}`);
-        return NextResponse.json<IAPVerificationResponse>(
-          {
-            success: false,
-            error: 'Receipt already used',
-            details: 'This transaction has already been processed'
-          },
-          { status: 400 }
-        );
-      }
     }
 
     // ============================================
