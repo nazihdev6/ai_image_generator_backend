@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { users, transactions, creditHistories } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, gte, desc } from 'drizzle-orm';
 import { verifyToken } from '@/lib/jwt';
 import { PRODUCT_CREDITS_MAP } from '@/lib/constants';
 import {
@@ -82,8 +82,7 @@ export async function POST(req: NextRequest) {
     // STEP 3: CHECK FOR DUPLICATES FIRST (Prevent race condition)
     // ============================================
 
-    // Check if this transaction ID has already been processed
-    // This prevents multiple simultaneous requests from adding credits multiple times
+    // Layer 1: Check if this exact transaction ID has already been processed
     const existingTransaction = await db
       .select()
       .from(transactions)
@@ -91,10 +90,9 @@ export async function POST(req: NextRequest) {
       .limit(1);
 
     if (existingTransaction.length > 0) {
-      console.log(`⚠️  Duplicate transaction detected (early check): ${transactionId}`);
+      console.log(`⚠️  Duplicate transaction detected (same ID): ${transactionId}`);
       console.log(`   Transaction already processed at: ${existingTransaction[0].verifiedAt}`);
       
-      // Return success with existing transaction details to avoid app errors
       const existingCredits = existingTransaction[0].credits;
       
       return NextResponse.json<IAPVerificationResponse>(
@@ -104,6 +102,45 @@ export async function POST(req: NextRequest) {
           newBalance: (await db.select().from(users).where(eq(users.id, userId)).limit(1))[0]?.credits || 0,
           isTestPurchase: existingTransaction[0].isTest || false,
           message: `Transaction already processed - ${existingCredits} credits were previously added`
+        },
+        { status: 200 }
+      );
+    }
+
+    // Layer 2: Check for recent purchases (same user, same product, within 10 seconds)
+    // This handles StoreKit bug where rapid polling generates different transaction IDs
+    const tenSecondsAgo = new Date(Date.now() - 10000);
+    
+    const recentSimilarPurchase = await db
+      .select()
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          eq(transactions.productId, productId),
+          eq(transactions.platform, platform),
+          gte(transactions.verifiedAt, tenSecondsAgo)
+        )
+      )
+      .orderBy(desc(transactions.verifiedAt))
+      .limit(1);
+
+    if (recentSimilarPurchase.length > 0) {
+      const timeDiff = Date.now() - recentSimilarPurchase[0].verifiedAt.getTime();
+      console.log(`⚠️  Duplicate purchase detected (time-based): ${productId}`);
+      console.log(`   User ${userId} purchased same product ${timeDiff}ms ago`);
+      console.log(`   Previous transaction: ${recentSimilarPurchase[0].transactionId}`);
+      console.log(`   Current transaction: ${transactionId}`);
+      
+      const existingCredits = recentSimilarPurchase[0].credits;
+      
+      return NextResponse.json<IAPVerificationResponse>(
+        {
+          success: true,
+          credits: existingCredits,
+          newBalance: (await db.select().from(users).where(eq(users.id, userId)).limit(1))[0]?.credits || 0,
+          isTestPurchase: recentSimilarPurchase[0].isTest || false,
+          message: `Duplicate purchase detected - ${existingCredits} credits were already added ${Math.round(timeDiff / 1000)} seconds ago`
         },
         { status: 200 }
       );

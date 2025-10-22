@@ -25,13 +25,13 @@ User received: 40 credits ❌
 
 ## ✅ **Solution: Multi-Layer Protection**
 
-### **Layer 1: Early Duplicate Check (Application Level)**
+### **Layer 1: Transaction ID Check (Application Level)**
 
-**Location:** `app/api/pricing/verify-purchase/route.ts` - Lines 82-110
+**Location:** `app/api/pricing/verify-purchase/route.ts` - Lines 85-108
 
 **How it works:**
 ```typescript
-// STEP 3: CHECK FOR DUPLICATES FIRST (Before verification)
+// Layer 1: Check if this exact transaction ID has already been processed
 const existingTransaction = await db
   .select()
   .from(transactions)
@@ -39,9 +39,8 @@ const existingTransaction = await db
   .limit(1);
 
 if (existingTransaction.length > 0) {
-  console.log(`⚠️ Duplicate transaction detected (early check): ${transactionId}`);
+  console.log(`⚠️ Duplicate transaction detected (same ID): ${transactionId}`);
   
-  // Return success to avoid app errors, but don't add credits again
   return NextResponse.json({
     success: true,
     credits: existingCredits,
@@ -53,9 +52,66 @@ if (existingTransaction.length > 0) {
 
 **Why this works:**
 - ✅ Checks BEFORE expensive Apple/Google verification
-- ✅ Uses `transactionId` from request (not from Apple's response)
+- ✅ Uses exact transaction ID matching
 - ✅ Returns success to prevent app from retrying
-- ✅ Fast database lookup prevents race conditions
+- ✅ Fast database lookup
+
+---
+
+### **Layer 1.5: Time-Based Duplicate Check (StoreKit Bug Protection)**
+
+**Location:** `app/api/pricing/verify-purchase/route.ts` - Lines 110-147
+
+**The Problem:**
+StoreKit has a bug where rapid `restorePurchases()` calls generate **different transaction IDs** for the same purchase! Example:
+
+```
+Real Purchase #1:
+Request 1: transactionId = "2000000875510556"  ← First ID
+Request 2: transactionId = "2000000875510654"  ← DIFFERENT ID (same purchase!)
+Request 3: transactionId = "2000000875510712"  ← DIFFERENT ID (same purchase!)
+```
+
+Layer 1 (transaction ID check) fails because IDs are different!
+
+**How it works:**
+```typescript
+// Layer 2: Check for recent purchases (same user, same product, within 10 seconds)
+const tenSecondsAgo = new Date(Date.now() - 10000);
+
+const recentSimilarPurchase = await db
+  .select()
+  .from(transactions)
+  .where(
+    and(
+      eq(transactions.userId, userId),
+      eq(transactions.productId, productId),
+      eq(transactions.platform, platform),
+      gte(transactions.verifiedAt, tenSecondsAgo)
+    )
+  )
+  .orderBy(desc(transactions.verifiedAt))
+  .limit(1);
+
+if (recentSimilarPurchase.length > 0) {
+  const timeDiff = Date.now() - recentSimilarPurchase[0].verifiedAt.getTime();
+  console.log(`⚠️ Duplicate purchase detected (time-based): ${productId}`);
+  console.log(`   User ${userId} purchased same product ${timeDiff}ms ago`);
+  console.log(`   Previous transaction: ${recentSimilarPurchase[0].transactionId}`);
+  console.log(`   Current transaction: ${transactionId}`);
+  
+  return NextResponse.json({
+    success: true,
+    message: `Duplicate purchase detected - credits already added ${timeDiff}ms ago`
+  });
+}
+```
+
+**Why this works:**
+- ✅ Catches duplicates even with different transaction IDs
+- ✅ Uses time-based logic: same user + same product + within 10 seconds = duplicate
+- ✅ Prevents StoreKit bug from causing multiple credit additions
+- ✅ Logs both transaction IDs for debugging
 
 ---
 
@@ -179,14 +235,14 @@ credits: 45  ← WRONG! Should be 15
 
 ### **After Fix:**
 
-**User purchases 10 credits, app sends 4 requests:**
+**User purchases 10 credits, app sends 4 requests with DIFFERENT transaction IDs (StoreKit bug):**
 
-| Request | Credits Added | User Balance | Response                          |
-|---------|---------------|--------------|-----------------------------------|
-| 1       | +10 ✅        | 15 ✅        | Success                           |
-| 2       | 0 ✅          | 15 ✅        | Already processed ✅              |
-| 3       | 0 ✅          | 15 ✅        | Already processed ✅              |
-| 4       | 0 ✅          | 15 ✅        | Already processed ✅              |
+| Request | Transaction ID   | Credits Added | User Balance | Detection Method      |
+|---------|------------------|---------------|--------------|----------------------|
+| 1       | 2000000875510556 | +10 ✅        | 15 ✅        | None (first)         |
+| 2       | 2000000875510654 | 0 ✅          | 15 ✅        | Time-based (1s ago) ✅|
+| 3       | 2000000875510712 | 0 ✅          | 15 ✅        | Time-based (2s ago) ✅|
+| 4       | 2000000875510800 | 0 ✅          | 15 ✅        | Time-based (3s ago) ✅|
 
 **Database:**
 ```sql
@@ -221,20 +277,24 @@ credits: 15  ✅ CORRECT!
 ✅ 10 credits added to user 3 (ios)
 ```
 
-### **After Fix:**
+### **After Fix (with Time-Based Detection):**
 ```
-21:26:01 POST 200 /api/pricing/verify-purchase
+21:26:01.100 POST 200 /api/pricing/verify-purchase
 💰 Credits updated for user 3: 5 → 15 (+10)
 ✅ 10 credits added to user 3 (ios)
 
-21:26:01 POST 200 /api/pricing/verify-purchase
-⚠️ Duplicate transaction detected (early check): apple_1000000123456789
-   Transaction already processed at: 2024-10-22T21:26:01.000Z
+21:26:01.850 POST 200 /api/pricing/verify-purchase
+⚠️ Duplicate purchase detected (time-based): com.ai.headshot.photo.generator.credits_10
+   User 3 purchased same product 750ms ago
+   Previous transaction: 2000000875510556
+   Current transaction: 2000000875510654
 ✅ Returned existing transaction details (no credits added)
 
-21:26:01 POST 200 /api/pricing/verify-purchase
-⚠️ Duplicate transaction detected (early check): apple_1000000123456789
-   Transaction already processed at: 2024-10-22T21:26:01.000Z
+21:26:02.200 POST 200 /api/pricing/verify-purchase
+⚠️ Duplicate purchase detected (time-based): com.ai.headshot.photo.generator.credits_10
+   User 3 purchased same product 1100ms ago
+   Previous transaction: 2000000875510556
+   Current transaction: 2000000875510712
 ✅ Returned existing transaction details (no credits added)
 ```
 
