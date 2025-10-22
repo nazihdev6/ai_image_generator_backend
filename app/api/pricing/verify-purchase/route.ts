@@ -173,25 +173,24 @@ export async function POST(req: NextRequest) {
     // STEP 7: ADD CREDITS TO USER
     // ============================================
 
-    const [updatedUser] = await db
-      .update(users)
-      .set({
-        credits: (credits as any), // Will be incremented via SQL
-        updatedAt: new Date()
-      })
-      .where(eq(users.id, userId))
-      .returning();
-
-    // Get current credits and add new credits
-    const currentUser = await db
+    // Get current credits and calculate new balance
+    const [currentUser] = await db
       .select()
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
 
-    const currentCredits = currentUser[0]?.credits || 0;
+    if (!currentUser) {
+      return NextResponse.json<IAPVerificationResponse>(
+        { success: false, error: 'User not found' },
+        { status: 404 }
+      );
+    }
+
+    const currentCredits = currentUser.credits || 0;
     const newBalance = currentCredits + credits;
 
+    // Update user's total credits
     await db
       .update(users)
       .set({
@@ -199,6 +198,8 @@ export async function POST(req: NextRequest) {
         updatedAt: new Date()
       })
       .where(eq(users.id, userId));
+
+    console.log(`💰 Credits updated for user ${userId}: ${currentCredits} → ${newBalance} (+${credits})`);
 
     // ============================================
     // STEP 8: SAVE TRANSACTION RECORD
